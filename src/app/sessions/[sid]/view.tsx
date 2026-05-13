@@ -25,6 +25,7 @@ import {
   RefreshCw,
   Copy,
   Check,
+  Activity,
 } from "lucide-react";
 import {
   ApiError,
@@ -43,6 +44,7 @@ import {
   sendMessageStream,
 } from "@/lib/api";
 import { AgentAvatar } from "@/components/agent-avatar";
+import { InspectorPanel } from "@/components/inspector-dialog";
 import {
   SdkStreamPanel,
   useSdkMessageStream,
@@ -233,10 +235,10 @@ export default function SessionThreadView() {
     return "";
   }, [session, agent]);
 
-  // Live SDKMessage stream — additive next to the historical /messages
-  // replay below. We only open the EventSource once the session is `ready`;
-  // the harness's event bus isn't running before then.
-  const sdkStreamEnabled = session?.status === "ready" && !!sessionId;
+  // Disabled — the passive EventSource was double-rendering with the
+  // /message_stream-driven assistant message. /message_stream is the single
+  // source of truth for live updates now.
+  const sdkStreamEnabled = false;
   const { messages: sdkMessages, status: sdkStreamStatus } =
     useSdkMessageStream(sessionId, sdkStreamEnabled);
 
@@ -597,6 +599,8 @@ export default function SessionThreadView() {
     [handleSend],
   );
 
+  const [inspectorOpen, setInspectorOpen] = useState(false);
+
   return (
     <div className="sessions-app flex w-full h-full bg-white text-gray-900 overflow-hidden">
       <MainPanel
@@ -619,6 +623,13 @@ export default function SessionThreadView() {
         restarting={restarting}
         restartError={restartError}
         handleRestart={handleRestart}
+        inspectorOpen={inspectorOpen}
+        setInspectorOpen={setInspectorOpen}
+      />
+      <InspectorPanel
+        open={inspectorOpen}
+        onClose={() => setInspectorOpen(false)}
+        sessionId={sessionId}
       />
     </div>
   );
@@ -648,6 +659,8 @@ interface MainPanelProps {
   restarting: boolean;
   restartError: string | null;
   handleRestart: () => void;
+  inspectorOpen: boolean;
+  setInspectorOpen: (v: boolean) => void;
 }
 
 function MainPanel({
@@ -670,6 +683,8 @@ function MainPanel({
   restarting,
   restartError,
   handleRestart,
+  inspectorOpen,
+  setInspectorOpen,
 }: MainPanelProps) {
   const sessionShortId = session?.id ? session.id.slice(0, 8) : "—";
   const statusLabel = session?.status ?? "unknown";
@@ -748,6 +763,20 @@ function MainPanel({
           )}
         </div>
         <div className="flex items-center gap-2 text-gray-400">
+          <button
+            type="button"
+            onClick={() => session && setInspectorOpen(!inspectorOpen)}
+            disabled={!session}
+            title="Inspector — tail the platform envelope + raw harness bus for this session"
+            className={`inline-flex items-center gap-1.5 text-[12px] border rounded px-2 py-1 transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
+              inspectorOpen
+                ? "bg-violet-50 border-violet-200 text-violet-700 hover:bg-violet-100"
+                : "border-gray-200 text-gray-600 hover:bg-gray-100"
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Inspect</span>
+          </button>
           <button
             type="button"
             onClick={() => session && setDiagnoseOpen(true)}
@@ -864,11 +893,6 @@ function MainPanel({
             message appears in both, the streaming row is fresher and
             wins by being rendered first.
           */}
-          <SdkStreamPanel
-            messages={sdkMessages}
-            status={sdkStreamStatus}
-          />
-
           {messages.map((m, i) => (
             <MessageBlock
               key={m.id}
@@ -900,6 +924,7 @@ function MainPanel({
           />
         </div>
       </div>
+
     </div>
   );
 }
