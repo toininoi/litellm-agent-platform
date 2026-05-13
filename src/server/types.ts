@@ -15,6 +15,7 @@
 import type { Agent, Memory, Session, WarmTask } from "@prisma/client";
 import { z } from "zod";
 import { decrypt, encrypt } from "@/server/integrations/core/crypto";
+import { parseAttachedSkillIds } from "@/server/skill-prompt";
 
 // ============================================================================
 // DB row types (re-export from Prisma, do not redefine)
@@ -250,18 +251,6 @@ export interface ApiAgent {
    */
   attached_skill_ids: string[];
   created_at: string;
-}
-
-/** Parse attached skill IDs from a prompt's `<!-- skill:<id> -->` markers. */
-function parseAttachedSkillIdsFromPrompt(prompt: string | null | undefined): string[] {
-  if (!prompt) return [];
-  const ids: string[] = [];
-  const re = /<!-- skill:([^\s>]+) -->/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(prompt)) !== null) {
-    ids.push(m[1]);
-  }
-  return ids;
 }
 
 export interface ApiMemory {
@@ -626,7 +615,7 @@ export function toApiAgent(row: AgentRow): ApiAgent {
         )
       : [],
     env_vars: decryptEnvVars(rawEnvVars),
-    attached_skill_ids: parseAttachedSkillIdsFromPrompt(row.prompt),
+    attached_skill_ids: parseAttachedSkillIds(row.prompt),
     created_at: row.created_at.toISOString(),
   };
 }

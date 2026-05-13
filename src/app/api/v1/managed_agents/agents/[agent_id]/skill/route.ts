@@ -11,20 +11,37 @@
  *     — attach an existing skill from the library by ID
  *
  *   { content: string, name?: string, description?: string, save_to_library?: boolean }
- *     — inline content. Always saved to the library first so we have an
- *       id for the marker. `save_to_library: false` is accepted for
- *       backward compatibility but is treated as a no-op (we always save).
+ *     — inline content. By default (save_to_library !== false) the content
+ *       is also saved to the Skill library so it can be reattached to
+ *       other agents. Pass `save_to_library: false` for an ephemeral
+ *       attachment — no Skill row is written and the marker uses a fresh
+ *       random UUID; the response will not include a `skill` field.
  *
  * DELETE removes a skill block from agent.prompt.
  *   - With `?skill_id=<id>`: strip only that block.
  *   - Without param: strip all skill blocks (legacy "detach all").
  */
 
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { assertAuth } from "@/server/auth";
 import { prisma } from "@/server/db";
-import { httpError, toApiAgent, toApiSkill } from "@/server/types";
+import {
+  appendSkillBlock,
+  stripAllSkillBlocks,
+  stripSkillBlock,
+} from "@/server/skill-prompt";
+import { httpError, toApiAgent, toApiSkill, type ApiSkill } from "@/server/types";
 import { wrap } from "@/server/route-helpers";
+
+// Re-export the prompt helpers from their canonical home for any
+// callers that imported them from this route file historically.
+export {
+  appendSkillBlock,
+  parseAttachedSkillIds,
+  stripAllSkillBlocks,
+  stripSkillBlock,
+} from "@/server/skill-prompt";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -45,67 +62,6 @@ const AttachSkillBody = z.union([
   }),
 ]);
 
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-/**
- * Append a per-skill block to the prompt. Idempotent on skill_id — if a
- * block for this skill already exists, the prompt is returned unchanged.
- */
-export function appendSkillBlock(
-  prompt: string | null | undefined,
-  skillId: string,
-  skillContent: string,
-): string {
-  const current = (prompt ?? "").trimEnd();
-  const markerRe = new RegExp(`(^|\\n)<!-- skill:${escapeRegex(skillId)} -->\\n`);
-  if (markerRe.test(current)) {
-    return current;
-  }
-  const block = `<!-- skill:${skillId} -->\n${skillContent.trim()}`;
-  return current ? `${current}\n\n${block}` : block;
-}
-
-/** Strip a single skill block (matching skill_id) from the prompt. */
-export function stripSkillBlock(
-  prompt: string | null | undefined,
-  skillId: string,
-): string {
-  const current = prompt ?? "";
-  const re = new RegExp(
-    `\\n?<!-- skill:${escapeRegex(skillId)} -->\\n[\\s\\S]*?(?=\\n<!-- skill:|$)`,
-  );
-  return current.replace(re, "").trimEnd();
-}
-
-/**
- * Strip every skill block from the prompt. Covers both the new
- * per-id marker (`<!-- skill:<id> -->`) and the legacy anonymous
- * `<!-- skill -->` marker used by earlier versions of this route.
- */
-export function stripAllSkillBlocks(prompt: string | null | undefined): string {
-  const current = prompt ?? "";
-  // Legacy anonymous marker — everything after it was the single skill.
-  const legacySplit = current.split(/\n<!-- skill -->\n/)[0];
-  // New per-id markers — strip every block.
-  return legacySplit
-    .replace(/\n?<!-- skill:[^\s>]+ -->\n[\s\S]*?(?=\n<!-- skill:|$)/g, "")
-    .trimEnd();
-}
-
-/** Parse the prompt and return attached skill_ids in marker order. */
-export function parseAttachedSkillIds(prompt: string | null | undefined): string[] {
-  const current = prompt ?? "";
-  const ids: string[] = [];
-  const re = /<!-- skill:([^\s>]+) -->/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(current)) !== null) {
-    ids.push(m[1]);
-  }
-  return ids;
-}
-
 export const POST = wrap<RouteContext>(async (req, ctx) => {
   const { user_id } = assertAuth(req);
   const { agent_id } = await ctx.params;
@@ -117,7 +73,7 @@ export const POST = wrap<RouteContext>(async (req, ctx) => {
 
   let skillId: string;
   let skillContent: string;
-  let savedSkill;
+  let savedSkill: ApiSkill | undefined;
 
   if ("skill_id" in body) {
     const skill = await prisma.skill.findUnique({ where: { skill_id: body.skill_id } });
@@ -126,21 +82,31 @@ export const POST = wrap<RouteContext>(async (req, ctx) => {
     skillContent = skill.content;
     savedSkill = toApiSkill(skill);
   } else {
-    // Inline content — always save to the library so we have an id for
-    // the marker. `save_to_library: false` is accepted but ignored;
-    // simpler than carrying two code paths.
-    const name = body.name?.trim() || `Skill ${new Date().toISOString().slice(0, 19)}`;
-    const row = await prisma.skill.create({
-      data: {
-        name,
-        description: body.description?.trim() ?? null,
-        content: body.content,
-        created_by: user_id,
-      },
-    });
-    skillId = row.skill_id;
-    skillContent = row.content;
-    savedSkill = toApiSkill(row);
+    // Inline content. Default behavior: persist the skill to the library
+    // so it can be reattached to other agents. Callers can opt out with
+    // `save_to_library: false` for an ephemeral marker — the id only
+    // exists on this agent's prompt and can't be looked up later.
+    const saveToLibrary = body.save_to_library !== false;
+    if (saveToLibrary) {
+      const name = body.name?.trim() || `Skill ${new Date().toISOString().slice(0, 19)}`;
+      const row = await prisma.skill.create({
+        data: {
+          name,
+          description: body.description?.trim() ?? null,
+          content: body.content,
+          created_by: user_id,
+        },
+      });
+      skillId = row.skill_id;
+      skillContent = row.content;
+      savedSkill = toApiSkill(row);
+    } else {
+      // Ephemeral: no Skill row written. The id only exists in the
+      // prompt marker; the skill can't be reattached to other agents
+      // from the library.
+      skillId = randomUUID();
+      skillContent = body.content;
+    }
   }
 
   const updated = await prisma.agent.update({
