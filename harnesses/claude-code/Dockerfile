@@ -21,6 +21,7 @@ COPY package.json ./
 RUN npm install --no-audit --no-fund
 
 COPY server.js ./
+COPY public ./public
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

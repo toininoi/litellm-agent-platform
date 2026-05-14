@@ -10,10 +10,23 @@
 //   POC_CMD=bash docker run …
 
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { WebSocketServer } from "ws";
 import pty from "node-pty";
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const PUBLIC_DIR = path.join(__dirname, "public");
+const HAS_PUBLIC = fs.existsSync(PUBLIC_DIR);
 const PORT = Number(process.env.PORT ?? 4096);
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".js":   "application/javascript; charset=utf-8",
+  ".css":  "text/css; charset=utf-8",
+  ".svg":  "image/svg+xml",
+  ".ico":  "image/x-icon",
+};
 const CMD = process.env.POC_CMD ?? "claude";
 const REPO_DIR = process.env.REPO_DIR ?? process.cwd();
 
@@ -96,6 +109,21 @@ const server = http.createServer(async (req, res) => {
     const ka = setInterval(() => res.write(":keepalive\n\n"), 15000);
     req.on("close", () => clearInterval(ka));
     return;
+  }
+
+  // Standalone debug UI: serve the bundled xterm.js page on / so that
+  // hitting the pod directly (via NodePort / LoadBalancer / port-forward)
+  // produces a working terminal without needing the LAP web tier.
+  if (req.method === "GET" && HAS_PUBLIC) {
+    const requested = (req.url ?? "/").replace(/\?.*$/, "");
+    const rel = requested === "/" ? "/index.html" : requested;
+    const candidate = path.join(PUBLIC_DIR, rel);
+    if (candidate.startsWith(PUBLIC_DIR) && fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      const ext = path.extname(candidate);
+      res.writeHead(200, { "content-type": MIME[ext] ?? "application/octet-stream" });
+      fs.createReadStream(candidate).pipe(res);
+      return;
+    }
   }
 
   res.writeHead(404, { "content-type": "application/json" });
