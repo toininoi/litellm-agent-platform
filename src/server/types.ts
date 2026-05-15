@@ -701,7 +701,7 @@ export function toApiSession(
   // Not IN_CLUSTER (local dev): sandbox_url is a NodePort address the browser
   // can reach directly; return null so the session view derives it client-side.
   const ttyUrl: string | null = (() => {
-    if (!row.sandbox_url) return null;
+    if (!row.sandbox_url || row.status !== "ready") return null;
     if (process.env.IN_CLUSTER === "true") {
       return `/api/v1/managed_agents/sessions/${row.session_id}/tty`;
     }

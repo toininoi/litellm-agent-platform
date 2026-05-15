@@ -67,6 +67,36 @@ function getPrisma() {
   return _prisma;
 }
 
+// --- Fix 1: DB cache (session_id → sandbox_url, 30s TTL) ---
+const SESSION_CACHE_TTL = 30_000;
+/** @type {Map<string, {url: string|null, expiresAt: number}>} */
+const sessionUrlCache = new Map();
+
+async function getSandboxUrl(sessionId) {
+  const now = Date.now();
+  const cached = sessionUrlCache.get(sessionId);
+
+  if (cached && cached.expiresAt > now) {
+    return cached.url;
+  }
+
+  try {
+    const session = await getPrisma().session.findUnique({
+      where: { session_id: sessionId },
+      select: { sandbox_url: true, status: true },
+    });
+    const url = session?.sandbox_url ?? null;
+    sessionUrlCache.set(sessionId, { url, expiresAt: now + SESSION_CACHE_TTL });
+    return url;
+  } catch (e) {
+    if (cached) {
+      console.warn("[tty-proxy] DB lookup failed, using stale cache for session", sessionId, e.message);
+      return cached.url;
+    }
+    throw e;
+  }
+}
+
 // Parse the HTTP request-line and headers from a raw buffer. Returns null if
 // the header block isn't complete yet (caller should buffer more data).
 function parseRequest(buf) {
@@ -88,9 +118,24 @@ function parseRequest(buf) {
 
 const TTY_PATH_RE = /\/api\/v1\/managed_agents\/sessions\/([^/?]+)\/tty/;
 
+// --- Fix 3: active connection tracking and draining flag ---
+/** @type {Set<import('net').Socket>} */
+const activeSockets = new Set();
+let draining = false;
+
 // Forward raw bytes to the Next.js server (running on NEXT_PORT locally).
-// Retries the connect up to ~15 s to cover the Next.js cold-start window.
-function forwardToNext(clientSocket, initialBuf, attempt = 0) {
+// Fix 3: return 503 immediately if draining.
+function forwardToNext(clientSocket, initialBuf) {
+  if (draining) {
+    try {
+      clientSocket.write(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+      );
+      clientSocket.destroy();
+    } catch {}
+    return;
+  }
+
   const target = connect(NEXT_PORT, "127.0.0.1");
   target.once("connect", () => {
     target.write(initialBuf);
@@ -100,17 +145,12 @@ function forwardToNext(clientSocket, initialBuf, attempt = 0) {
     target.on("error", () => { try { clientSocket.destroy(); } catch {} });
   });
   target.once("error", () => {
-    if (attempt < 30) {
-      // Next.js not ready yet — retry after 500 ms.
-      setTimeout(() => forwardToNext(clientSocket, initialBuf, attempt + 1), 500);
-    } else {
-      try {
-        clientSocket.write(
-          "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-        );
-        clientSocket.destroy();
-      } catch {}
-    }
+    try {
+      clientSocket.write(
+        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+      );
+      clientSocket.destroy();
+    } catch {}
   });
 }
 
@@ -127,11 +167,7 @@ async function handleTtyUpgrade(clientSocket, buf, sessionId, token) {
 
   let sandboxUrl;
   try {
-    const session = await getPrisma().session.findUnique({
-      where: { session_id: sessionId },
-      select: { sandbox_url: true, status: true },
-    });
-    sandboxUrl = session?.sandbox_url ?? null;
+    sandboxUrl = await getSandboxUrl(sessionId);
   } catch (e) {
     console.error("[tty-proxy] DB lookup failed:", e.message);
     try {
@@ -181,8 +217,19 @@ async function handleTtyUpgrade(clientSocket, buf, sessionId, token) {
 
 function createProxy() {
   return createServer((clientSocket) => {
+    // Fix 3: track active connections for graceful drain
+    activeSockets.add(clientSocket);
+    clientSocket.once("close", () => activeSockets.delete(clientSocket));
+
     let buf = Buffer.alloc(0);
     let decided = false;
+
+    // Fix 4: idle timeout while buffering headers (10s)
+    const idleTimer = setTimeout(() => {
+      if (!decided) {
+        try { clientSocket.destroy(); } catch {}
+      }
+    }, 10_000);
 
     const onData = (chunk) => {
       if (decided) return;
@@ -193,6 +240,7 @@ function createProxy() {
       if (!parsed && buf.length < 16_384) return;
 
       decided = true;
+      clearTimeout(idleTimer);
       clientSocket.removeListener("data", onData);
 
       if (!parsed) {
@@ -228,6 +276,7 @@ function createProxy() {
 }
 
 // Start Next.js on an internal port so only the proxy faces the network.
+// Returns the child process so the SIGTERM handler can kill it.
 function startNextServer() {
   const child = spawn("node", ["server.js"], {
     env: { ...process.env, PORT: String(NEXT_PORT), HOSTNAME: "127.0.0.1" },
@@ -240,17 +289,78 @@ function startNextServer() {
   process.on("exit", () => {
     try { child.kill(); } catch {}
   });
+  return child;
 }
 
-startNextServer();
+// Fix 2: poll for Next.js TCP readiness before starting proxy
+function waitForNextReady(port, intervalMs, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const deadline = Date.now() + timeoutMs;
+    function attempt() {
+      const sock = connect(port, "127.0.0.1");
+      sock.once("connect", () => {
+        sock.destroy();
+        resolve();
+      });
+      sock.once("error", () => {
+        sock.destroy();
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) {
+          reject(new Error(`Next.js did not become ready within ${timeoutMs}ms`));
+          return;
+        }
+        console.debug(`[tty-proxy] waiting for Next.js on port ${port}...`);
+        setTimeout(attempt, intervalMs);
+      });
+    }
+    attempt();
+  });
+}
 
-const proxy = createProxy();
-proxy.listen(PORT, HOSTNAME, () => {
-  console.log(
-    `[tty-proxy] listening on ${HOSTNAME}:${PORT} — Next.js on 127.0.0.1:${NEXT_PORT}`,
-  );
-});
-proxy.on("error", (e) => {
-  console.error("[tty-proxy] server error:", e.message);
-  process.exit(1);
-});
+const nextChild = startNextServer();
+
+waitForNextReady(NEXT_PORT, 200, 60_000)
+  .then(() => {
+    console.log(`[tty-proxy] Next.js ready on 127.0.0.1:${NEXT_PORT}`);
+
+    const proxy = createProxy();
+
+    // Fix 3: SIGTERM graceful drain
+    process.on("SIGTERM", () => {
+      draining = true;
+      proxy.close();
+
+      const drainTimeout = setTimeout(() => {
+        for (const sock of activeSockets) {
+          try { sock.destroy(); } catch {}
+        }
+        try { nextChild.kill(); } catch {}
+        process.exit(0);
+      }, 30_000);
+
+      function checkDrained() {
+        if (activeSockets.size === 0) {
+          clearTimeout(drainTimeout);
+          try { nextChild.kill(); } catch {}
+          process.exit(0);
+        } else {
+          setTimeout(checkDrained, 100);
+        }
+      }
+      checkDrained();
+    });
+
+    proxy.listen(PORT, HOSTNAME, () => {
+      console.log(
+        `[tty-proxy] listening on ${HOSTNAME}:${PORT} — Next.js on 127.0.0.1:${NEXT_PORT}`,
+      );
+    });
+    proxy.on("error", (e) => {
+      console.error("[tty-proxy] server error:", e.message);
+      process.exit(1);
+    });
+  })
+  .catch((e) => {
+    console.error("[tty-proxy]", e.message);
+    process.exit(1);
+  });

@@ -85,6 +85,10 @@ export function TerminalPanel({ sessionId, harnessId, ttyUrl, sandboxUrl, ttyTok
       return;
     }
 
+    const wsUrl: string = resolvedUrl;
+
+    // hostRef is always mounted (the overlay pattern keeps the div in the DOM).
+    // This guard is kept as a defensive check against future render changes.
     if (!hostRef.current) return;
     let disposed = false;
     let term: import("@xterm/xterm").Terminal | null = null;
@@ -121,7 +125,7 @@ export function TerminalPanel({ sessionId, harnessId, ttyUrl, sandboxUrl, ttyTok
       // fit needs a real width/height. requestAnimationFrame waits one frame.
       requestAnimationFrame(() => fit?.fit());
 
-      const url = resolvedUrl!;
+      const url = wsUrl;
 
       ws = new WebSocket(url);
       ws.binaryType = "arraybuffer";
