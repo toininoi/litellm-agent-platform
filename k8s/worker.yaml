@@ -190,6 +190,16 @@ spec:
             - name: KUBECONFIG
               value: ""
 
+            # Harness auth token: worker injects this into warm pool pods via
+            # buildContainerEnv and uses it to probe stale warm pods in the
+            # reconciler. Without it, all warm pods get HARNESS_AUTH_TOKEN=""
+            # and every TTY connection returns 401.
+            - name: CONTAINER_ENV_HARNESS_AUTH_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: litellm-env
+                  key: CONTAINER_ENV_HARNESS_AUTH_TOKEN
+
           resources:
             requests:
               cpu: "100m"
