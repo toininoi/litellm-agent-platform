@@ -340,14 +340,26 @@ jobs:
         run: |
           IMG="${REGISTRY}:harness-gemini-${SHA}"
           LATEST="${REGISTRY}:harness-gemini-latest"
-          changed=$(git diff --name-only HEAD~1 HEAD -- harnesses/gemini/ harnesses/_shared/ || echo changed)
+          DOCKERFILE="harnesses/gemini/Dockerfile"
+          BEFORE="${{ github.event.before }}"
+          if [ "$BEFORE" = "0000000000000000000000000000000000000000" ] || [ -z "$BEFORE" ]; then
+            changed=yes
+          else
+            changed=$(git diff --name-only "$BEFORE" HEAD -- harnesses/gemini/ harnesses/_shared/ || echo changed)
+          fi
           if [ -n "$changed" ]; then
             echo "gemini changed — building"
-            docker buildx build -f harnesses/gemini/Dockerfile -t "$IMG" .
+            docker buildx build -f "$DOCKERFILE" -t "$IMG" .
             docker push "$IMG"
           else
             echo "gemini unchanged — retagging"
-            docker pull "$LATEST" && docker tag "$LATEST" "$IMG" && docker push "$IMG"
+            if docker pull "$LATEST" 2>/dev/null; then
+              docker tag "$LATEST" "$IMG" && docker push "$IMG"
+            else
+              echo "gemini: :latest not in ECR — building"
+              docker buildx build -f "$DOCKERFILE" -t "$IMG" .
+              docker push "$IMG"
+            fi
           fi
           docker tag "$IMG" "$LATEST" && docker push "$LATEST"
           echo "image=$IMG" >> "$GITHUB_OUTPUT"
