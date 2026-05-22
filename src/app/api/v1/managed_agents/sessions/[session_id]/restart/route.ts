@@ -140,6 +140,7 @@ export async function POST(req: Request, ctx: RouteContext) {
         sandbox_url: inlineUrl,
         harness_session_id,
         status: "ready",
+        sandboxes: null,
       });
 
       // Replay history as first message if available
@@ -255,6 +256,7 @@ export async function POST(req: Request, ctx: RouteContext) {
         sandbox_url,
         harness_session_id,
         status: "ready",
+        sandboxes: null,
       });
 
       return Response.json(toApiSession(updated, response, null, agent.harness_id));

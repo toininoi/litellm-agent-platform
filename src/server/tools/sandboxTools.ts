@@ -1,5 +1,7 @@
 import { fetch } from "undici";
 
+import type { Prisma } from "@prisma/client";
+
 import { prisma } from "@/server/db";
 import { env } from "@/server/env";
 import { runTask, waitHttpReady, waitRunningGetUrl } from "@/server/k8s";
@@ -17,14 +19,29 @@ export async function provisionSandbox(
   session_id: string,
   name: string,
   agent: AgentRow,
+  existingSandboxes?: Record<string, string>,
 ): Promise<string> {
   if (env.LOCAL_EXECUTOR_URL) {
     sandboxMap.set(mapKey(session_id, name), env.LOCAL_EXECUTOR_URL);
+    const merged = { ...(existingSandboxes ?? {}), [name]: env.LOCAL_EXECUTOR_URL };
+    await prisma.session.update({
+      where: { session_id },
+      // Cast required: Prisma client types pre-date the `sandboxes` column
+      // migration. Remove the cast after `prisma generate` is re-run.
+      data: { sandboxes: merged } as Prisma.SessionUpdateInput,
+    });
     return `sandbox '${name}' ready`;
   }
 
   if (env.LOCAL_SANDBOX_URL) {
     sandboxMap.set(mapKey(session_id, name), env.LOCAL_SANDBOX_URL);
+    const merged = { ...(existingSandboxes ?? {}), [name]: env.LOCAL_SANDBOX_URL };
+    await prisma.session.update({
+      where: { session_id },
+      // Cast required: Prisma client types pre-date the `sandboxes` column
+      // migration. Remove the cast after `prisma generate` is re-run.
+      data: { sandboxes: merged } as Prisma.SessionUpdateInput,
+    });
     return `sandbox '${name}' ready`;
   }
 
@@ -38,9 +55,12 @@ export async function provisionSandbox(
   const sandbox_url = await waitRunningGetUrl(task_arn, agent);
   await waitHttpReady(sandbox_url);
 
+  const merged = { ...(existingSandboxes ?? {}), [name]: sandbox_url };
   await prisma.session.update({
     where: { session_id },
-    data: { sandbox_url },
+    // Cast required: Prisma client types pre-date the `sandboxes` column
+    // migration. Remove the cast after `prisma generate` is re-run.
+    data: { sandbox_url, sandboxes: merged } as Prisma.SessionUpdateInput,
   });
 
   sandboxMap.set(mapKey(session_id, name), sandbox_url);
@@ -52,7 +72,19 @@ export async function executeSandbox(
   name: string,
   cmd: string,
 ): Promise<string> {
-  const sandbox_url = sandboxMap.get(mapKey(session_id, name));
+  let sandbox_url = sandboxMap.get(mapKey(session_id, name));
+  if (!sandbox_url) {
+    // Cold path: pod restarted and wiped in-memory map. Rehydrate from DB.
+    const row = await (prisma.session.findUnique as (args: unknown) => Promise<Record<string, unknown> | null>)({
+      where: { session_id },
+      select: { sandboxes: true },
+    });
+    const stored = (row?.sandboxes as Record<string, string> | null)?.[name];
+    if (stored) {
+      sandboxMap.set(mapKey(session_id, name), stored);
+      sandbox_url = stored;
+    }
+  }
   if (!sandbox_url) {
     return `error: sandbox '${name}' not provisioned — call provision first`;
   }
@@ -82,10 +114,14 @@ export function getSandboxUrl(
   return sandboxMap.get(mapKey(session_id, name));
 }
 
-export function clearSandboxes(session_id: string): void {
+export async function clearSandboxes(session_id: string): Promise<void> {
   for (const key of sandboxMap.keys()) {
     if (key.startsWith(`${session_id}:`)) {
       sandboxMap.delete(key);
     }
   }
+  await prisma.session.update({
+    where: { session_id },
+    data: { sandboxes: {} } as Prisma.SessionUpdateInput,
+  }).catch(() => {});
 }

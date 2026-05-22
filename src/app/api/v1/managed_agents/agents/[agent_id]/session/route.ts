@@ -414,6 +414,7 @@ async function finishBringUp(
     sandbox_url,
     harness_session_id,
     status: "ready",
+    sandboxes: null,
   });
   // Fire-and-forget the initial agent task. The session is already ready;
   // the caller (and UI) doesn't need to block on the agent loop, which for
@@ -636,6 +637,7 @@ export const POST = wrap<RouteContext>(async (req, ctx) => {
       sandbox_url: inlineUrl,
       harness_session_id,
       status: "ready",
+      sandboxes: null,
     });
 
     if (body.initial_prompt) {

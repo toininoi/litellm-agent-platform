@@ -516,6 +516,11 @@ export interface ApiSession {
   // instead of opaque short-ids. Null on brand-new sessions where no user
   // turn has been recorded yet — the UI falls back to `Session {shortId}`.
   title_preview: string | null;
+  // Map of named sandboxes spawned during this session: sandbox name → URL.
+  // Null when no named sandboxes have been registered (e.g. a session that
+  // hasn't run any multi-sandbox tools yet). Clients can use this to verify
+  // which sandboxes are still live and to reach them directly.
+  sandboxes: Record<string, string> | null;
 }
 
 // Admin / observability — wire shape returned by GET /api/v1/admin/stats.
@@ -1046,6 +1051,12 @@ export function toApiSession(
     phase_detail: row.phase_detail ?? null,
     origin,
     title_preview: extractTitlePreview(row.history),
+    sandboxes: (() => {
+      const s = (row as Record<string, unknown>).sandboxes;
+      return s && typeof s === "object" && !Array.isArray(s)
+        ? (s as Record<string, string>)
+        : null;
+    })(),
   };
 }
 

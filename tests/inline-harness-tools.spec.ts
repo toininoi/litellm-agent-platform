@@ -138,7 +138,93 @@ test.describe("inline harness session — tool access and MCP usage", () => {
     expect(json.error ?? "").not.toMatch(/not found/i);
   }, TURN_TIMEOUT_MS);
 
-  test("4. agent describes LIT-3198 via Linear MCP (not via Bash or file tools)", async () => {
+  test("4b. sandbox URL persists after cold cache (regression: in-memory wipe)", async () => {
+    // Regression: sandboxMap was in-memory. A pod restart wiped it, causing
+    // executeSandbox to return "sandbox 'X' not provisioned" even though the
+    // K8s pod still ran. Fix: persist sandbox URLs to the `sandboxes` DB column.
+    // This test verifies that:
+    //   a) provision writes to the DB (sandboxes field appears on GET response)
+    //   b) execute reads from the DB (not from in-memory map), so it still works
+    //      after a hypothetical cold-cache scenario.
+
+    // 1. Fresh session for the agent-with-projects.
+    const session = await apiPost(`agents/${AGENT_WITH_PROJECTS_ID}/session`, {
+      title: "e2e persist-test",
+    });
+    const persistSessionId = session.id as string;
+    if (!persistSessionId) throw new Error("session create returned no id");
+
+    // 2. Wait for ready.
+    await waitForReady(persistSessionId, 30_000);
+
+    // 3. Provision a sandbox named "persist-test".
+    const provisionRes = await fetch(
+      `${BASE_URL}/api/v1/managed_agents/sessions/${persistSessionId}/sandbox/provision`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${MASTER_KEY}`,
+        },
+        body: JSON.stringify({
+          name: "persist-test",
+          project_id: AGENT_WITH_PROJECTS_PROJECT_ID,
+        }),
+      },
+    );
+    const provisionJson = await provisionRes.json() as Record<string, unknown>;
+
+    // 4. Provision must return 200.
+    expect(
+      provisionRes.status,
+      `provision returned ${provisionRes.status}: ${JSON.stringify(provisionJson)}`,
+    ).toBe(200);
+
+    // 5. GET the session and verify the `sandboxes` field contains the entry.
+    const sessionRow = await apiGet(`sessions/${persistSessionId}`);
+    const sandboxes = sessionRow.sandboxes as Record<string, unknown> | null | undefined;
+    expect(sandboxes, "session row should have a sandboxes field").toBeDefined();
+    expect(
+      sandboxes!["persist-test"],
+      "sandboxes['persist-test'] should be a non-null URL (DB persisted)",
+    ).toBeTruthy();
+
+    // 6. Execute a command in the provisioned sandbox.
+    const executeRes = await fetch(
+      `${BASE_URL}/api/v1/managed_agents/sessions/${persistSessionId}/sandbox/execute`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${MASTER_KEY}`,
+        },
+        body: JSON.stringify({
+          sandbox_name: "persist-test",
+          cmd: "echo cold-path-works",
+        }),
+      },
+    );
+    const executeJson = await executeRes.json() as Record<string, unknown>;
+
+    // 7. Execute must succeed and output must contain the echoed string.
+    expect(
+      executeRes.status,
+      `execute returned ${executeRes.status}: ${JSON.stringify(executeJson)}`,
+    ).toBe(200);
+    const output = (executeJson.output ?? executeJson.stdout ?? "") as string;
+    expect(output).toContain("cold-path-works");
+
+    // 8. Re-read the session row to confirm DB persistence is still intact
+    //    (the execute path must not clear the column).
+    const sessionRowAfter = await apiGet(`sessions/${persistSessionId}`);
+    const sandboxesAfter = sessionRowAfter.sandboxes as Record<string, unknown> | null | undefined;
+    expect(
+      sandboxesAfter?.["persist-test"],
+      "sandboxes['persist-test'] should remain non-null after execute (DB persistence check)",
+    ).toBeTruthy();
+  }, TURN_TIMEOUT_MS);
+
+  test("5. agent describes LIT-3198 via Linear MCP (not via Bash or file tools)", async () => {
     const reply = await sendMessage(
       sessionId,
       "Describe this Linear ticket: https://linear.app/litellm-ai/issue/LIT-3198/add-otel-spans-for-mcp — use only the Linear MCP tool to fetch it.",

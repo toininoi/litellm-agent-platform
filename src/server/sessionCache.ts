@@ -25,6 +25,9 @@ export interface SessionCacheEntry {
   sandbox_url: string;
   harness_session_id: string;
   status: string;
+  // Mirror of Session.sandboxes — map of named sandbox name → URL. Null when
+  // no named sandboxes have been registered for this session.
+  sandboxes: Record<string, string> | null;
 }
 
 const FLUSH_INTERVAL_MS = 5_000;
@@ -89,6 +92,12 @@ async function hydrate(
     sandbox_url: row.sandbox_url ?? "",
     harness_session_id: row.harness_session_id ?? "",
     status: row.status,
+    sandboxes: (() => {
+      const s = (row as Record<string, unknown>).sandboxes;
+      return s && typeof s === "object" && !Array.isArray(s)
+        ? (s as Record<string, string>)
+        : null;
+    })(),
   };
   putCachedSession(entry);
   return entry;

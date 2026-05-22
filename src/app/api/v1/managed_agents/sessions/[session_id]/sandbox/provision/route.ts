@@ -64,6 +64,16 @@ export async function POST(req: Request, ctx: RouteContext) {
     });
     if (!row) httpError(404, `session ${session_id} not found`);
 
+    // Extract existing sandboxes map from the session row so provisionSandbox
+    // can merge into it without a second DB read.
+    const rawSandboxes = (row as Record<string, unknown>).sandboxes;
+    const existingSandboxes: Record<string, string> =
+      rawSandboxes !== null &&
+      typeof rawSandboxes === "object" &&
+      !Array.isArray(rawSandboxes)
+        ? (rawSandboxes as Record<string, string>)
+        : {};
+
     const agent = row.agent;
 
     // Locate the project within the agent's projects JSON array.
@@ -92,7 +102,7 @@ export async function POST(req: Request, ctx: RouteContext) {
       branch: projectBranch,
     };
 
-    await provisionSandbox(session_id, body.name, agentWithProject);
+    await provisionSandbox(session_id, body.name, agentWithProject, existingSandboxes);
 
     return Response.json({ message: `sandbox '${body.name}' ready` });
   } catch (e) {
